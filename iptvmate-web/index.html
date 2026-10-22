@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101116">
+  <title>IPTV Mate Web</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><div class="brand-mark">▶</div><div><strong>IPTV <span>MATE</span></strong><small>WEB PLAYER</small></div></div>
+      <button class="nav-item active" data-view="live">▣ <span>Live TV</span></button>
+      <button class="nav-item" data-view="favorites">★ <span>Favourites</span></button>
+      <button class="nav-item" data-view="recent">◷ <span>Recently played</span></button>
+      <div class="side-section">PLAYLIST</div>
+      <div id="playlistStatus" class="playlist-status">No playlist loaded</div>
+      <button class="side-action" id="loadPlaylistBtn">＋ Add playlist</button>
+      <div class="side-section">CATEGORIES</div>
+      <div id="categoryList" class="category-list"><button class="category active" data-category="All">All channels</button></div>
+      <div class="sidebar-footer">IPTV Mate Web <span>Unofficial web edition</span></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="menuBtn" class="icon-button mobile-only" aria-label="Open menu">☰</button>
+        <div class="page-heading"><h1 id="pageTitle">Live TV</h1><p id="pageSubtitle">Your channels, all in one place.</p></div>
+        <label class="search-box"><span>⌕</span><input id="searchInput" type="search" placeholder="Search channels…" autocomplete="off"></label>
+        <button class="primary-button" id="topLoadBtn">＋ <span>Add playlist</span></button>
+      </header>
+
+      <section class="player-layout">
+        <div class="player-column">
+          <div class="video-frame" id="videoFrame">
+            <video id="video" controls playsinline></video>
+            <div class="video-placeholder" id="videoPlaceholder">
+              <div class="placeholder-icon">▶</div>
+              <h2>Welcome to IPTV Mate</h2>
+              <p>Load an M3U playlist and select a channel to start watching.</p>
+              <button class="primary-button" id="placeholderLoadBtn">＋ Load playlist</button>
+            </div>
+            <div class="video-error hidden" id="videoError"></div>
+          </div>
+          <div class="now-playing">
+            <div class="channel-avatar" id="nowAvatar">TV</div>
+            <div class="now-info"><h2 id="nowTitle">No channel selected</h2><p id="nowMeta">Choose a channel from the list</p></div>
+            <button id="nowFavBtn" class="icon-button favorite-button" aria-label="Toggle favourite" title="Toggle favourite">☆</button>
+          </div>
+          <div class="player-note"><span class="status-dot"></span> Playback depends on stream format and browser support.</div>
+        </div>
+        <aside class="channel-panel">
+          <div class="channel-panel-head"><div><h2 id="listTitle">Channels</h2><p id="channelCount">0 channels</p></div><button class="icon-button" id="refreshBtn" title="Clear search">↻</button></div>
+          <div id="channelList" class="channel-list">
+            <div class="empty-state"><div>▤</div><strong>No channels yet</strong><p>Add an M3U playlist to get started.</p></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="playlistDialog">
+    <form method="dialog" id="playlistForm">
+      <div class="dialog-head"><div><h2>Add playlist</h2><p>Load an M3U or M3U8 playlist URL, or select a local file.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <label class="field-label" for="playlistUrl">Playlist URL</label>
+      <input id="playlistUrl" type="url" placeholder="https://example.com/playlist.m3u">
+      <p class="help-text">The playlist server must allow browser access (CORS). A localhost URL only works if the server is running on this same device.</p>
+      <div class="or-divider"><span>OR</span></div>
+      <label class="field-label" for="playlistFile">Choose a local M3U file</label>
+      <input id="playlistFile" type="file" accept=".m3u,.m3u8,.txt,audio/x-mpegurl,application/vnd.apple.mpegurl">
+      <div class="dialog-error hidden" id="dialogError"></div>
+      <div class="dialog-actions"><button class="secondary-button" value="cancel">Cancel</button><button class="primary-button" id="importBtn" type="submit">Load playlist</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
