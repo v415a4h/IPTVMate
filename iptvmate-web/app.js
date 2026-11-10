@@ -22,7 +22,7 @@
     // CORS proxy template, e.g. "https://my-proxy.example/?url={url}" (or a plain prefix). Empty = disabled.
     proxy: store.get("proxy", ""),
     startTimeout: 12000, fetchTimeout: 30000, stallTimeout: 20000,
-    maxRetries: 4, pageSize: 200, historyMax: 8,
+    maxRetries: 4, pageSize: 200, historyMax: 8, prebufferMax: 12000,
     libs: {
       hls: "https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js",
       mpegts: "https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js",
@@ -31,12 +31,33 @@
   };
   const LABELS = { hls: "HLS", mpegts: "MPEG-TS", dash: "DASH", native: "Native" };
 
+  // Buffer profiles: more delay = fewer stalls.
+  //  prebuffer = seconds to buffer before showing the stream; cushion = seconds to rebuild after a stall.
+  const PROFILES = {
+    smooth: { label: "Smooth", prebuffer: 8, cushion: 6,
+      hls: { lowLatencyMode: false, maxBufferLength: 60, maxMaxBufferLength: 180, maxBufferSize: 120e6, backBufferLength: 30,
+        liveSyncDuration: 20, liveMaxLatencyDuration: 90, maxBufferHole: 0.5, nudgeMaxRetry: 10, startFragPrefetch: true,
+        capLevelToPlayerSize: true, abrBandWidthFactor: 0.8, abrBandWidthUpFactor: 0.5 },
+      mpegts: { liveBufferLatencyChasing: false, enableStashBuffer: true, stashInitialSize: 1024 * 1024,
+        autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 30, autoCleanupMinBackwardDuration: 15 } },
+    balanced: { label: "Balanced", prebuffer: 3, cushion: 3,
+      hls: { lowLatencyMode: false, maxBufferLength: 40, maxMaxBufferLength: 90, backBufferLength: 30,
+        liveSyncDuration: 10, liveMaxLatencyDuration: 40, maxBufferHole: 0.3, nudgeMaxRetry: 6,
+        capLevelToPlayerSize: true, abrBandWidthFactor: 0.85, abrBandWidthUpFactor: 0.6 },
+      mpegts: { liveBufferLatencyChasing: false, enableStashBuffer: true, autoCleanupSourceBuffer: true } },
+    low: { label: "Low delay", prebuffer: 0, cushion: 0,
+      hls: { maxBufferLength: 20, backBufferLength: 15 },
+      mpegts: { liveBufferLatencyChasing: true, enableStashBuffer: false } }
+  };
+  let mode = store.get("mode", "smooth"); if (!PROFILES[mode]) mode = "smooth";
+  const profile = () => PROFILES[mode];
+
   const state = {
     channels: [], byId: new Map(), counts: new Map(), filtered: [], rendered: 0, limit: CONFIG.pageSize,
     category: "All", view: "live", current: null, engine: null, playing: false, retries: 0,
     favorites: new Set(store.get("fav", [])), recent: store.get("recent", []),
     playlistName: "", source: null, hints: new Map(),
-    toastTimer: 0, retryTimer: 0, stallTimer: 0, searchTimer: 0
+    toastTimer: 0, retryTimer: 0, stallTimer: 0, searchTimer: 0, holding: false, label: "", stalls: []
   };
   let playToken = 0;
   const baseTitle = document.title;
@@ -331,6 +352,7 @@
     <button data-act="next" title="Next channel (N)" aria-label="Next channel">⏭</button>
     <button data-act="retry" title="Reload stream (R)" aria-label="Reload stream">⟳</button>
     <button data-act="mute" title="Mute (M)" aria-label="Mute">🔊</button>
+    <select id="ctlMode" title="Buffer mode: Smooth = fewest stalls (more delay), Low delay = closest to live" aria-label="Buffer mode"></select>
     <select id="ctlQuality" title="Quality" aria-label="Quality" style="display:none"></select>
     <button data-act="pip" title="Picture in picture (P)">PiP</button>
     <button data-act="fs" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
@@ -340,6 +362,13 @@
   const qualitySel = $("ctlQuality"), statusEl = $("ctlStatus"), muteBtn = bar.querySelector('[data-act="mute"]');
   const setStatus = (t) => { statusEl.textContent = t || ""; };
   const showLoading = (on_) => spinner.classList.toggle("show", !!on_);
+  const modeSel = $("ctlMode");
+  Object.entries(PROFILES).forEach(([k, p]) => modeSel.add(new Option(p.label, k)));
+  modeSel.value = mode;
+  on(modeSel, "change", () => {
+    mode = modeSel.value; store.set("mode", mode); toast(`Buffer mode: ${profile().label}`);
+    if (state.current) playChannel(state.current, { retry: true });
+  });
 
   const v = els.video;
   v.controls = true; v.playsInline = true; v.preload = "auto";
@@ -374,7 +403,7 @@
       await loadLib("Hls", CONFIG.libs.hls);
       if (!Hls.isSupported()) throw new Error("HLS isn't supported by this browser engine");
       const hls = new Hls({
-        enableWorker: true, maxBufferLength: 30, backBufferLength: 30,
+        enableWorker: true, ...profile().hls,
         manifestLoadingMaxRetry: 2, levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 4,
         xhrSetup: o.proxy ? (xhr, u) => xhr.open("GET", proxify(u), true) : undefined   // proxy every playlist + segment request
       });
@@ -394,7 +423,7 @@
       await loadLib("mpegts", CONFIG.libs.mpegts);
       if (!mpegts.getFeatureList().mseLivePlayback) throw new Error("MPEG-TS (MSE) isn't supported by this browser");
       const p = mpegts.createPlayer({ type: /\.flv($|[?#])/i.test(url) ? "flv" : "mpegts", isLive: true, url },
-        { enableWorker: true, liveBufferLatencyChasing: true, lazyLoadMaxDuration: 60 });
+        { enableWorker: true, ...profile().mpegts });
       p.attachMediaElement(el);
       p.on(mpegts.Events.ERROR, (type, detail) => fail(new Error(`${type}: ${detail}`)));
       p.load();
@@ -463,7 +492,7 @@
       state.retries = 0;
       state.recent = [channel.id, ...state.recent.filter((id) => id !== channel.id)].slice(0, 30); store.set("recent", state.recent);
     }
-    state.current = channel; state.playing = false;
+    state.current = channel; state.playing = false; state.holding = false; state.stalls = [];
     updateNowPlaying(); markSelected();
     els.placeholder.classList.add("hidden"); els.videoError.classList.add("hidden"); showLoading(true);
     destroyEngine();
@@ -475,8 +504,12 @@
       try {
         await startEngine(s, tok);
         if (tok !== playToken) return;
-        state.playing = true; state.hints.set(hostOf(channel.url), s.engine);
-        showLoading(false); setStatus(LABELS[s.engine] + (s.proxy ? " · proxy" : "")); updateNowPlaying(LABELS[s.engine]);
+        state.hints.set(hostOf(channel.url), s.engine);
+        state.label = LABELS[s.engine] + (s.proxy ? " · proxy" : ""); updateNowPlaying(LABELS[s.engine]);
+        const P = profile();   // build a small cushion first so playback doesn't stutter right after starting
+        if (P.prebuffer && bufferAhead() < P.prebuffer) await holdUntilBuffered(P.prebuffer, CONFIG.prebufferMax, tok);
+        if (tok !== playToken) return;
+        state.playing = true; showLoading(false);
         if (v.paused) v.play().catch((e) => { if (e.name === "NotAllowedError") { v.muted = true; v.play().catch(() => toast("Press play to start.")); } });
         return;
       } catch (e) {
@@ -503,7 +536,7 @@
   }
   function playbackError(message) { els.videoError.textContent = message; els.videoError.classList.remove("hidden"); }
   function stopPlayback() {
-    playToken++; clearTimeout(state.retryTimer); clearTimeout(state.stallTimer); state.playing = false;
+    playToken++; clearTimeout(state.retryTimer); clearTimeout(state.stallTimer); state.playing = false; state.holding = false;
     destroyEngine(); showLoading(false); setStatus("");
     els.placeholder.classList.remove("hidden"); els.videoError.classList.add("hidden"); document.title = baseTitle;
   }
@@ -517,13 +550,59 @@
     try { navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || "Live TV", artwork: c.logo ? [{ src: c.logo }] : [] }); } catch {}
   }
 
-  // Buffering watchdog + volume persistence
+  /* ---------- anti-buffering logic ---------- */
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Seconds of video buffered ahead of the playhead.
+  function bufferAhead() {
+    const t = v.currentTime, b = v.buffered;
+    for (let i = 0; i < b.length; i++) if (b.end(i) >= t && b.start(i) - t < 1.5) return b.end(i) - Math.max(t, b.start(i));
+    return 0;
+  }
+  // If the playhead sits in a tiny gap between buffered ranges, jump over it.
+  function nudge() {
+    const t = v.currentTime, b = v.buffered;
+    for (let i = 0; i < b.length; i++) if (b.start(i) <= t && t <= b.end(i)) return false;
+    for (let i = 0; i < b.length; i++) if (b.start(i) > t && b.start(i) - t < 2) { v.currentTime = b.start(i) + 0.05; return true; }
+    return false;
+  }
+  // Pause until `secs` are buffered (or maxMs passed with some data), then resume.
+  async function holdUntilBuffered(secs, maxMs, tok) {
+    if (state.holding) return;
+    state.holding = true; showLoading(true); if (!v.paused) v.pause();
+    const t0 = Date.now();
+    while (tok === playToken && state.holding) {
+      if (!v.paused) { state.holding = false; return; }          // someone pressed play
+      const ahead = bufferAhead();
+      if (ahead >= secs || (Date.now() - t0 > maxMs && ahead >= 0.5)) break;
+      setStatus(`Buffering ${ahead.toFixed(0)}/${secs}s…`); await sleep(300);
+    }
+    if (tok !== playToken || !state.holding) return;
+    state.holding = false; v.play().catch(() => {});
+  }
+  // Two stalls within a minute → cap the HLS quality one step lower.
+  function noteStall() {
+    const now = Date.now(); state.stalls = state.stalls.filter((t) => now - t < 60000); state.stalls.push(now);
+    const h = state.engine?.hls;
+    if (state.stalls.length >= 2 && h && h.autoLevelEnabled && h.levels.length > 1) {
+      const cur = h.currentLevel >= 0 ? h.currentLevel : h.loadLevel;
+      if (cur > 0) { h.autoLevelCapping = cur - 1; state.stalls = []; toast("Connection is slow. Lowering quality to keep it smooth."); }
+    }
+  }
   on(v, "waiting", () => {
-    if (!state.playing) return;
-    showLoading(true); clearTimeout(state.stallTimer);
-    state.stallTimer = setTimeout(() => onRuntimeError(new Error("stream stalled")), CONFIG.stallTimeout);
+    if (!state.playing || state.holding) return;
+    showLoading(true);
+    clearTimeout(state.stallTimer); state.stallTimer = setTimeout(() => onRuntimeError(new Error("stream stalled")), CONFIG.stallTimeout);
+    if (nudge()) return;
+    noteStall();
+    const c = profile().cushion; if (c) holdUntilBuffered(c, 12000, playToken);
   });
-  ["playing", "canplay", "pause", "ended"].forEach((ev) => on(v, ev, () => { clearTimeout(state.stallTimer); if (ev !== "ended") showLoading(false); }));
+  on(v, "playing", () => { clearTimeout(state.stallTimer); if (!state.holding) showLoading(false); });
+  on(v, "canplay", () => { if (!state.holding) showLoading(false); });
+  on(v, "pause", () => { if (!state.holding) { clearTimeout(state.stallTimer); showLoading(false); } });
+  on(v, "ended", () => clearTimeout(state.stallTimer));
+  setInterval(() => { if (state.playing && !state.holding && state.label) setStatus(`${state.label} · ${bufferAhead().toFixed(0)}s buffered`); }, 1000);
+
+  // Volume persistence
   on(v, "volumechange", () => { store.set("vol", v.volume); store.set("muted", v.muted); muteBtn.textContent = v.muted || v.volume === 0 ? "🔇" : "🔊"; });
   muteBtn.textContent = v.muted ? "🔇" : "🔊";
   try {
