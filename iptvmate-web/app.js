@@ -610,6 +610,106 @@
     navigator.mediaSession.setActionHandler("nexttrack", () => zap(1));
   } catch {}
 
+  /* ================= saved playlists + export ================= */
+  const slim = () => state.channels.map(({ name, group, logo, tvgId, url }) => ({ name, group, logo, tvgId, url }));
+  const savedList = () => store.get("playlists", []);
+  const cleanName = () => (state.playlistName || "").replace(/ \(saved\)$/, "");
+
+  const svStyle = document.createElement("style");
+  svStyle.textContent = `
+    #savedDialog{color-scheme:light dark;background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,.4);border-radius:14px;padding:0;width:min(520px,92vw);max-height:80vh}
+    #savedDialog::backdrop{background:rgba(0,0,0,.55)}
+    .sv-body{padding:16px}
+    .sv-head,.sv-row,.sv-item{display:flex;gap:8px;align-items:center}
+    .sv-head{justify-content:space-between;margin-bottom:10px}.sv-row{margin-bottom:10px;flex-wrap:wrap}
+    #savedDialog input{flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;font:inherit}
+    #savedDialog button{background:rgba(127,127,127,.18);color:inherit;border:1px solid rgba(127,127,127,.3);border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer}
+    #savedDialog button:hover{background:rgba(127,127,127,.32)}
+    .sv-list{overflow:auto;max-height:46vh;border-top:1px solid rgba(127,127,127,.25);padding-top:8px}
+    .sv-item{padding:8px 0;border-bottom:1px solid rgba(127,127,127,.15)}
+    .sv-item div{flex:1;min-width:0}.sv-item small{display:block;opacity:.65}
+    .sv-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .sv-empty{opacity:.65;padding:10px 0}`;
+  document.head.appendChild(svStyle);
+
+  const savedDlg = document.createElement("dialog"); savedDlg.id = "savedDialog";
+  savedDlg.innerHTML = `<div class="sv-body">
+    <div class="sv-head"><strong>Saved playlists</strong><button type="button" data-sv="close" aria-label="Close">✕</button></div>
+    <div class="sv-row"><input id="svName" type="text" maxlength="60" placeholder="Name this playlist" aria-label="Playlist name"><button type="button" data-sv="save">Save current</button></div>
+    <div class="sv-row"><button type="button" data-sv="export">Export all (.m3u)</button><button type="button" data-sv="exportFav">Export favourites (.m3u)</button></div>
+    <div id="svList" class="sv-list"></div></div>`;
+  document.body.appendChild(savedDlg);
+
+  function saveCurrent(name) {
+    if (!state.channels.length) return toast("Load a playlist first.");
+    name = (name || "").trim() || cleanName() || "My playlist";
+    const list = savedList(), old = list.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    const id = old?.id || hash(name + Date.now());
+    const entry = { id, name, source: state.source || { type: "file" }, count: state.channels.length, ts: Date.now() };
+    const cached = store.set("pl:" + id, { channels: slim() });
+    if (!cached) store.del("pl:" + id);
+    if (!cached && entry.source.type !== "url") return toast("Too large to store in the browser. Use Export (.m3u) instead.");
+    store.set("playlists", [entry, ...list.filter((p) => p.id !== id)]);
+    toast(cached ? `Saved "${name}"` : `Saved the link for "${name}" (too large to keep offline)`);
+    renderSaved();
+  }
+  function loadSaved(id) {
+    const e = savedList().find((p) => p.id === id); if (!e) return;
+    const data = store.get("pl:" + id, null);
+    if (!data?.channels?.length && e.source?.type !== "url") return toast("This playlist's data is no longer stored. Re-import the file.");
+    savedDlg.close();
+    if (data?.channels?.length) {
+      stopPlayback(); state.current = null;
+      setChannels(data.channels.map(makeChannel), e.name); state.source = e.source; persistPlaylist(e.name, e.source);
+      toast(`Loaded "${e.name}"`);
+    } else { els.file.value = ""; els.url.value = e.source.url; readPlaylist(); }
+  }
+  function exportM3U(onlyFavs) {
+    const list = onlyFavs ? state.channels.filter((c) => state.favorites.has(c.id)) : state.channels;
+    if (!list.length) return toast(onlyFavs ? "No favourites to export yet." : "Load a playlist first.");
+    const q = (x) => String(x || "").replace(/["\r\n]+/g, " ").trim();
+    const text = "#EXTM3U\n" + list.map((c) => `#EXTINF:-1 tvg-id="${q(c.tvgId)}" tvg-logo="${q(c.logo)}" group-title="${q(c.group)}",${q(c.name)}\n${c.url}`).join("\n") + "\n";
+    const base = cleanName().replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "playlist";
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([text], { type: "audio/x-mpegurl" })), download: `${base}${onlyFavs ? "-favourites" : ""}.m3u` });
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`Exported ${list.length.toLocaleString()} channels`);
+  }
+  function renderSaved() {
+    const box = $("svList"), list = savedList(); box.textContent = "";
+    if (!list.length) { const d = document.createElement("div"); d.className = "sv-empty"; d.textContent = 'Nothing saved yet. Load a playlist, then press "Save current".'; box.appendChild(d); return; }
+    for (const p of list) {
+      const item = document.createElement("div"); item.className = "sv-item";
+      const info = document.createElement("div"), n = document.createElement("strong"), m = document.createElement("small");
+      n.textContent = p.name; n.title = p.source?.url || p.name;
+      m.textContent = `${p.count.toLocaleString()} channels · ${p.source?.type === "url" ? hostOf(p.source.url) : "file"} · ${new Date(p.ts).toLocaleDateString()}`;
+      info.append(n, m);
+      const load = document.createElement("button"), del = document.createElement("button");
+      load.type = "button"; del.type = "button"; load.textContent = "Load"; del.textContent = "Delete";
+      load.dataset.sv = "load"; del.dataset.sv = "delete"; load.dataset.id = p.id; del.dataset.id = p.id;
+      del.setAttribute("aria-label", `Delete ${p.name}`);
+      item.append(info, load, del); box.appendChild(item);
+    }
+  }
+  on(savedDlg, "click", (e) => {
+    if (e.target === savedDlg) return savedDlg.close();     // backdrop click
+    const b = e.target.closest("[data-sv]"); if (!b) return;
+    const a = b.dataset.sv;
+    if (a === "close") savedDlg.close();
+    else if (a === "save") saveCurrent($("svName").value);
+    else if (a === "export") exportM3U(false);
+    else if (a === "exportFav") exportM3U(true);
+    else if (a === "load") loadSaved(b.dataset.id);
+    else if (a === "delete" && confirm("Delete this saved playlist?")) {
+      store.del("pl:" + b.dataset.id); store.set("playlists", savedList().filter((p) => p.id !== b.dataset.id)); renderSaved();
+    }
+  });
+  on($("svName"), "keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveCurrent(e.target.value); } });
+  const openBtn = document.createElement("button"); openBtn.type = "button"; openBtn.textContent = "💾 Playlists";
+  const loadBtn = $("loadPlaylistBtn");
+  if (loadBtn) { openBtn.className = loadBtn.className; loadBtn.insertAdjacentElement("afterend", openBtn); } else bar.appendChild(openBtn);
+  on(openBtn, "click", () => { $("svName").value = cleanName(); renderSaved(); savedDlg.showModal(); });
+
   /* ================= events ================= */
   ["loadPlaylistBtn", "topLoadBtn", "placeholderLoadBtn"].forEach((id) => on($(id), "click", openDialog));
   on($("playlistForm"), "submit", (e) => { e.preventDefault(); readPlaylist(); });
@@ -634,7 +734,7 @@
 
   on(document, "keydown", (e) => {
     if (e.key === "Escape") $("sidebar")?.classList.remove("open");
-    if (e.ctrlKey || e.metaKey || e.altKey || els.dialog?.open) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector("dialog[open]")) return;
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
     if (typing) return;
     const k = e.key.toLowerCase();
